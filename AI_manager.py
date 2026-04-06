@@ -1,8 +1,20 @@
 from PyQt6.QtCore import QObject, pyqtSignal, QUuid
 from AI_professor_chat import AIProfessorChat
 from threads import AIResponseThread
-from TTS_manager import TTSManager
-from voice_input import VoiceInput
+from affinity_manager import AffinityManager
+from seminar_manager import SeminarManager
+from paper_critique import PaperCritiqueGenerator
+try:
+    from TTS_manager import TTSManager
+    HAS_TTS = True
+except ImportError:
+    HAS_TTS = False
+
+try:
+    from voice_input import VoiceInput
+    HAS_VOICE = True
+except ImportError:
+    HAS_VOICE = False
 from rag_retriever import RagRetriever
 import os
 
@@ -19,27 +31,63 @@ class AIManager(QObject):
     # 信号定义
     ai_response_ready = pyqtSignal(str)       # AI回复准备好信号
     vad_started = pyqtSignal()                # 语音活动开始信号
-    vad_stopped = pyqtSignal()                # 语音活动结束信号  
+    vad_stopped = pyqtSignal()                # 语音活动结束信号
     voice_text_received = pyqtSignal(str)     # 接收到语音文本信号
     voice_error = pyqtSignal(str)             # 语音错误信号
     voice_ready = pyqtSignal()                # 语音系统就绪信号
     voice_device_switched = pyqtSignal(bool)  # 语音设备切换状态信号
     ai_sentence_ready = pyqtSignal(str, str)  # 单句AI回复准备好信号（内容, 请求ID）
     ai_generation_cancelled = pyqtSignal()    # AI生成被取消信号
+    affinity_changed = pyqtSignal(int, int, str)  # 好感度变化信号（新值, delta, 原因）
+    cooldown_started = pyqtSignal(int)            # 冷却开始信号（秒数）
+    cooldown_ended = pyqtSignal()                 # 冷却结束信号
+    # 组会模式信号
+    seminar_started = pyqtSignal(str)             # 组会开始（论文标题）
+    seminar_question = pyqtSignal(str, int, int)  # 问题, 当前题号, 总题数
+    seminar_evaluation = pyqtSignal(str, int, str)  # 点评, delta, quality
+    seminar_ended = pyqtSignal(str)               # 组会总结
+    seminar_easter_egg = pyqtSignal(str)          # 彩蛋台词
+    seminar_error = pyqtSignal(str)               # 组会错误
+    paper_critique_ready = pyqtSignal(str)         # 论文锐评就绪
     
     def __init__(self):
         """初始化AI管理器"""
         super().__init__()
         
+        # 初始化好感度管理器
+        self.affinity_manager = AffinityManager()
+        self.affinity_manager.affinity_changed.connect(self._on_affinity_changed)
+        self.affinity_manager.cooldown_started.connect(self._on_cooldown_started)
+        self.affinity_manager.cooldown_ended.connect(self._on_cooldown_ended)
+
+        # 初始化组会管理器
+        self.seminar_manager = SeminarManager(self.affinity_manager)
+        self.seminar_manager.seminar_started.connect(self.seminar_started)
+        self.seminar_manager.question_ready.connect(self.seminar_question)
+        self.seminar_manager.evaluation_ready.connect(self.seminar_evaluation)
+        self.seminar_manager.seminar_ended.connect(self.seminar_ended)
+        self.seminar_manager.easter_egg_triggered.connect(self.seminar_easter_egg)
+        self.seminar_manager.error_occurred.connect(self.seminar_error)
+
+        # 初始化论文锐评生成器
+        self.critique_generator = PaperCritiqueGenerator(self.affinity_manager)
+        self.critique_generator.critique_ready.connect(self.paper_critique_ready)
+        self.critique_generator.critique_error.connect(
+            lambda err: print(f"[锐评] {err}"))
+
         # 初始化AI聊天助手
         self._init_ai_assistant()
-        
-        # 初始化TTS管理器
-        self.tts_manager = TTSManager()
-        # 连接TTS播放开始信号
-        self.tts_manager.tts_playback_started.connect(self._on_tts_playback_started)
-        # 连接TTS音频实际播放开始信号
-        self.tts_manager.tts_audio_playback_started.connect(self._on_tts_audio_playback_started)
+
+        # 初始化TTS管理器（可选）
+        self.tts_manager = None
+        if HAS_TTS:
+            try:
+                self.tts_manager = TTSManager()
+                self.tts_manager.tts_playback_started.connect(self._on_tts_playback_started)
+                self.tts_manager.tts_audio_playback_started.connect(self._on_tts_audio_playback_started)
+            except Exception as e:
+                print(f"TTS初始化跳过: {e}")
+                self.tts_manager = None
         
         # 缓存待显示的句子
         self.pending_sentences = {}
@@ -64,6 +112,8 @@ class AIManager(QObject):
     def _init_ai_assistant(self):
         """初始化AI聊天助手和响应线程"""
         self.ai_chat = AIProfessorChat()
+        # 注入好感度管理器
+        self.ai_chat.affinity_manager = self.affinity_manager
         self.ai_response_thread = AIResponseThread(self.ai_chat)
         self.ai_response_thread.response_ready.connect(self._on_ai_response_ready)
         # 连接新的单句信号
@@ -71,23 +121,27 @@ class AIManager(QObject):
     
     def init_voice_recognition(self, input_device_index=0):
         """初始化语音识别系统"""
+        if not HAS_VOICE:
+            print("语音模块未安装，跳过语音识别初始化")
+            return False
+
         if self.voice_input is not None:
             return True  # 已经初始化
-        
+
         try:
             # 创建语音输入对象
             self.voice_input = VoiceInput(input_device_index)
-            
+
             # 连接信号
             self.voice_input.text_received.connect(self._on_voice_text_received)
             self.voice_input.vad_started.connect(self._on_vad_started)
             self.voice_input.vad_stopped.connect(self._on_vad_stopped)
             self.voice_input.error_occurred.connect(self._on_voice_error)
             self.voice_input.initialization_complete.connect(self._on_voice_init_complete)
-            
+
             # 开始后台初始化
             self.voice_input.initialize()
-            
+
             return True
         except Exception as e:
             print(f"初始化语音识别失败: {str(e)}")
@@ -105,10 +159,11 @@ class AIManager(QObject):
         print("取消当前的AI响应...")
         
         # 停止TTS播放并清除与当前请求相关的所有待处理TTS
-        if self.current_request_id:
-            self.tts_manager.cancel_request_id(self.current_request_id)
-        else:
-            self.tts_manager.stop_playing()  # 旧版兼容
+        if self.tts_manager:
+            if self.current_request_id:
+                self.tts_manager.cancel_request_id(self.current_request_id)
+            else:
+                self.tts_manager.stop_playing()
         
         # 处理已收集的部分响应
         # 只有当有实际内容时才添加到历史记录
@@ -142,11 +197,21 @@ class AIManager(QObject):
     
     def is_busy(self):
         """检查是否有AI响应正在生成或TTS正在播放"""
-        return self.is_generating_response or not self.tts_manager.is_queue_empty()
+        if self.tts_manager:
+            return self.is_generating_response or not self.tts_manager.is_queue_empty()
+        return self.is_generating_response
     
     def get_ai_response(self, query, paper_id=None, visible_content=None):
         """获取AI对用户查询的响应"""
         try:
+            # 检查教授是否在冷却中（摔门离开了）
+            if self.affinity_manager and self.affinity_manager.is_in_cooldown():
+                remaining = self.affinity_manager.get_cooldown_remaining()
+                self.ai_response_ready.emit(
+                    f"（教授摔门离开了，{remaining}秒后才会回来。反省一下你的问题吧。）"
+                )
+                return None
+
             # 如果已经有正在生成的响应，先取消它
             if self.is_generating_response:
                 self.cancel_current_response()
@@ -173,6 +238,9 @@ class AIManager(QObject):
                 
             # 获取论文数据并设置上下文
             if paper_id and self.data_manager:
+                # 切换论文时更新好感度
+                if self.affinity_manager and paper_id != self.affinity_manager.current_paper_id:
+                    self.affinity_manager.switch_paper(paper_id)
                 paper_data = self.data_manager.load_rag_tree(paper_id)
                 if paper_data:
                     self.ai_chat.set_paper_context(paper_id, paper_data)
@@ -199,10 +267,13 @@ class AIManager(QObject):
         """处理AI响应就绪事件"""
         # 更新状态标志
         self.is_generating_response = False
-        
+
+        # 好感度评估：在AI完成回复后，评估用户最后一个问题的质量
+        self._evaluate_affinity()
+
         # 发出信号通知UI
         self.ai_response_ready.emit(response)
-        
+
         # 不再重复调用TTS - 只有在非流式响应时才使用TTS
         if not self.ai_response_thread.use_streaming:
             self._speak_response(response)
@@ -235,15 +306,18 @@ class AIManager(QObject):
         # 确保有当前请求ID
         if not self.current_request_id:
             return
-        
+
+        if not self.tts_manager:
+            # 没有TTS时，直接发出显示信号让UI显示句子
+            self.ai_sentence_ready.emit(text, self.current_request_id)
+            self.pending_sentences.pop(sentence_id, None)
+            return
+
         # 为文本添加标识，用于在TTS开始播放时匹配回来
         if sentence_id:
-            # 保存文本、请求ID和情绪的映射关系，请求TTS时传递请求ID和情绪
             self.tts_manager.request_tts(text, self.current_request_id, emotion)
-            # 存储映射关系（句子ID与句子内容+请求ID+情绪）
             self.pending_sentences[sentence_id] = (text, self.current_request_id, emotion)
         else:
-            # 对于非流式响应，直接传递请求ID和情绪
             self.tts_manager.request_tts(text, self.current_request_id, emotion)
     
     def _on_tts_playback_started(self, text, request_id):
@@ -284,6 +358,8 @@ class AIManager(QObject):
     
     def get_voice_devices(self):
         """获取可用的语音输入设备"""
+        if not HAS_VOICE:
+            return []
         return VoiceInput.get_input_devices()
     
     def switch_voice_device(self, device_index):
@@ -340,10 +416,121 @@ class AIManager(QObject):
     def _on_voice_error(self, error_message):
         self.voice_error.emit(error_message)
     
+    # ==================== 组会模式 ====================
+
+    def start_seminar(self):
+        """启动组会模式"""
+        # 获取当前论文数据
+        paper_data = None
+        if self.data_manager and self.data_manager.current_paper:
+            paper_id = self.data_manager.current_paper.get('id')
+            if paper_id:
+                paper_data = self.data_manager.load_rag_tree(paper_id)
+                if not paper_data:
+                    # fallback: use current_paper directly
+                    paper_data = self.data_manager.current_paper
+
+        if not paper_data:
+            self.seminar_error.emit("请先选择一篇论文，再进入组会模式")
+            return
+
+        # 在后台线程中执行（避免UI阻塞），使用QThread-less方式：
+        # seminar_manager 内部调用 LLM 是同步的，需要在线程中运行
+        from PyQt6.QtCore import QThread
+        self._seminar_thread = _SeminarStartThread(self.seminar_manager, paper_data)
+        self._seminar_thread.start()
+
+    def submit_seminar_answer(self, answer: str):
+        """提交组会答案（在后台评估）"""
+        from PyQt6.QtCore import QThread
+        self._seminar_eval_thread = _SeminarEvalThread(self.seminar_manager, answer)
+        self._seminar_eval_thread.start()
+
+    def end_seminar(self):
+        """结束组会"""
+        self.seminar_manager.end_seminar_early()
+
+    def is_in_seminar(self) -> bool:
+        """是否正在组会中"""
+        return self.seminar_manager.is_active
+
+    # ==================== 论文锐评 ====================
+
+    def generate_paper_critique(self, paper_id: str):
+        """为指定论文生成教授锐评"""
+        if not self.data_manager:
+            return
+        paper_data = self.data_manager.load_rag_tree(paper_id)
+        if not paper_data:
+            return
+        self.critique_generator.generate(paper_data)
+
+    # ==================== 好感度系统 ====================
+
+    def _evaluate_affinity(self):
+        """评估用户最近一次提问的质量，更新好感度"""
+        try:
+            if not self.affinity_manager or not self.ai_chat:
+                return
+            # 找到最近一条用户消息
+            history = self.ai_chat.conversation_history
+            last_user_msg = None
+            for msg in reversed(history):
+                if msg["role"] == "user":
+                    last_user_msg = msg["content"]
+                    break
+            if not last_user_msg:
+                return
+
+            # 获取论文标题
+            paper_title = ""
+            if self.ai_chat.current_paper_data:
+                paper_title = (self.ai_chat.current_paper_data.get('translated_title', '')
+                               or self.ai_chat.current_paper_data.get('title', ''))
+
+            # 增加对话轮次
+            self.affinity_manager.increment_conversation()
+
+            # 调用LLM评估
+            result = self.affinity_manager.evaluate_question(
+                question=last_user_msg,
+                conversation_history=history,
+                paper_title=paper_title
+            )
+
+            delta = result.get("delta", 0)
+            reason = result.get("reason", "")
+            if delta != 0:
+                self.affinity_manager.update_affinity(delta, reason)
+                print(f"[好感度] {delta:+d} ({reason}) → 当前: {self.affinity_manager.affinity}")
+        except Exception as e:
+            print(f"[好感度] 评估失败: {e}")
+
+    def _on_affinity_changed(self, value, delta, reason):
+        """转发好感度变化信号，并检查彩蛋触发"""
+        self.affinity_changed.emit(value, delta, reason)
+
+        # 好感度达到100时触发彩蛋（不在组会中、未触发过）
+        if (value >= 100
+                and delta > 0
+                and not self.seminar_manager.is_active
+                and not getattr(self, '_easter_egg_fired', False)):
+            self._easter_egg_fired = True
+            from seminar_manager import EASTER_EGG_SPEECH
+            self.seminar_easter_egg.emit(EASTER_EGG_SPEECH)
+
+    def _on_cooldown_started(self, seconds):
+        """转发冷却开始信号"""
+        self.cooldown_started.emit(seconds)
+
+    def _on_cooldown_ended(self):
+        """转发冷却结束信号"""
+        self.cooldown_ended.emit()
+
     def cleanup(self):
         """清理所有资源"""
         # 停止TTS
-        if hasattr(self, 'tts_manager'):
+        if self.tts_manager:
             self.tts_manager.stop()
         
         # 停止语音识别
@@ -429,3 +616,29 @@ class AIManager(QObject):
                 self.markdown_view._scroll_to_matching_content(content, 'title')
             else:
                 self.markdown_view._scroll_to_matching_content(content, 'text')
+
+
+# ==================== 组会后台线程 ====================
+
+from PyQt6.QtCore import QThread
+
+class _SeminarStartThread(QThread):
+    """在后台生成组会问题，避免阻塞 UI"""
+    def __init__(self, seminar_manager, paper_data):
+        super().__init__()
+        self.seminar_manager = seminar_manager
+        self.paper_data = paper_data
+
+    def run(self):
+        self.seminar_manager.start_seminar(self.paper_data)
+
+
+class _SeminarEvalThread(QThread):
+    """在后台评估组会答案，避免阻塞 UI"""
+    def __init__(self, seminar_manager, answer):
+        super().__init__()
+        self.seminar_manager = seminar_manager
+        self.answer = answer
+
+    def run(self):
+        self.seminar_manager.submit_answer(self.answer)

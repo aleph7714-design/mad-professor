@@ -134,7 +134,7 @@ class VoiceInputThread(QThread):
                 # 创建新录音器
                 self.recorder = AudioToTextRecorder(
                     spinner=False,
-                    model='large-v2',
+                    model='base',
                     language='zh',
                     input_device_index=current_device,
                     silero_sensitivity=0.5,

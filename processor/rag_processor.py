@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Tuple, Dict, List, Any
-from langchain.text_splitter import MarkdownHeaderTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_community.vectorstores.utils import DistanceStrategy
 from config import EmbeddingModel
@@ -91,7 +91,11 @@ class RagProcessor:
         docs = md_splitter.split_text(content)
         
         self.logger.info(f"分割后得到 {len(docs)} 个文档片段")
-        
+
+        if not docs:
+            self.logger.warning("文档分割后为空，跳过向量库创建")
+            return str(vector_store_path_obj)
+
         # 创建向量存储
         vector_store = FAISS.from_documents(
             documents=docs,

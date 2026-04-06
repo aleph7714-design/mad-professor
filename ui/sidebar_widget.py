@@ -1,7 +1,8 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                           QListWidget, QListWidgetItem, QLabel, QFrame)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                           QListWidget, QListWidgetItem, QLabel, QFrame,
+                           QMenu, QMessageBox)
 from PyQt6.QtCore import Qt, QPropertyAnimation, QEasingCurve, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QAction
 
 from ui.upload_widget import UploadWidget  # 导入上传文件窗口类
 
@@ -9,6 +10,7 @@ class SidebarWidget(QWidget):
     """可折叠侧边栏"""
     # 定义信号
     paper_selected = pyqtSignal(str)  # 论文选择信号，传递论文ID
+    paper_delete_requested = pyqtSignal(str)  # 删除论文信号，传递论文ID
     upload_file = pyqtSignal(str)  # 上传文件信号，传递文件路径（转发）
     pause_processing = pyqtSignal()  # 暂停处理信号（转发）
     resume_processing = pyqtSignal()  # 继续处理信号（转发）
@@ -137,7 +139,10 @@ class SidebarWidget(QWidget):
         
         # 连接论文列表点击信号
         self.paper_list.itemClicked.connect(self.on_paper_item_clicked)
-        
+        # 启用右键菜单
+        self.paper_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.paper_list.customContextMenuRequested.connect(self.on_paper_context_menu)
+
         list_layout.addWidget(self.paper_list)
         
         # 创建上传文件窗口
@@ -212,7 +217,34 @@ class SidebarWidget(QWidget):
         if paper:
             # 发送论文选择信号
             self.paper_selected.emit(paper.get('id'))
-            
+
+    def on_paper_context_menu(self, pos):
+        """论文列表右键菜单"""
+        item = self.paper_list.itemAt(pos)
+        if not item:
+            return
+        paper = item.data(Qt.ItemDataRole.UserRole)
+        if not paper:
+            return
+
+        menu = QMenu(self)
+        delete_action = QAction("删除论文", self)
+        delete_action.triggered.connect(lambda: self._confirm_delete_paper(paper))
+        menu.addAction(delete_action)
+        menu.exec(self.paper_list.mapToGlobal(pos))
+
+    def _confirm_delete_paper(self, paper):
+        """确认删除论文"""
+        title = paper.get('translated_title', '') or paper.get('title', '') or paper.get('id', '')
+        reply = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除论文「{title}」吗？\n此操作将删除论文的所有处理数据，不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.paper_delete_requested.emit(paper.get('id'))
+
     def on_upload_file(self, file_path):
         """处理上传文件事件，转发上传文件信号"""
         self.upload_file.emit(file_path)

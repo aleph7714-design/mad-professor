@@ -1,5 +1,4 @@
 sentence_transformers
-modelscope
 faiss-cpu
 scikit-learn
 langchain
@@ -10,5 +9,5 @@ PyQt6-WebEngine
 markdown
 pymdown-extensions
 zhconv
-RealtimeSTT
-pyaudio
+openai
+pymupdf4llm

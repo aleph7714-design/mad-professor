@@ -1,7 +1,8 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                           QTextEdit, QScrollArea, QLabel, QFrame, QComboBox)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                           QTextEdit, QScrollArea, QLabel, QFrame, QComboBox,
+                           QProgressBar)
 from PyQt6.QtCore import Qt, QTimer, QSize
-from PyQt6.QtGui import QIcon, QFont
+from PyQt6.QtGui import QIcon, QFont, QColor
 
 # 导入自定义组件和工具类
 from paths import get_asset_path
@@ -28,10 +29,12 @@ class ChatWidget(QWidget):
         self.paper_controller = None  # 论文控制器引用
         self.loading_bubble = None  # 加载动画引用
         self.is_voice_active = False  # 语音功能是否激活
-        
+        self.cooldown_timer = None   # 冷却倒计时定时器
+        self._in_seminar = False     # 是否在组会模式
+
         # 初始化UI
         self.init_ui()
-        
+
         # 界面显示后立即初始化语音功能
         QTimer.singleShot(500, self.init_voice_recognition)
         
@@ -40,7 +43,7 @@ class ChatWidget(QWidget):
         self.ai_controller = ai_controller
         # 连接AI控制器信号
         self.ai_controller.ai_response_ready.connect(self.on_ai_response_ready)
-        self.ai_controller.ai_sentence_ready.connect(self.on_ai_sentence_ready)  
+        self.ai_controller.ai_sentence_ready.connect(self.on_ai_sentence_ready)
         self.ai_controller.voice_text_received.connect(self.on_voice_text_received)
         self.ai_controller.vad_started.connect(self.on_vad_started)
         self.ai_controller.vad_stopped.connect(self.on_vad_stopped)
@@ -49,9 +52,27 @@ class ChatWidget(QWidget):
         self.ai_controller.voice_device_switched.connect(self.on_device_switched)
         # 新增信号连接
         self.ai_controller.ai_generation_cancelled.connect(self.on_ai_generation_cancelled)
-        
+        # 好感度信号
+        self.ai_controller.affinity_changed.connect(self.on_affinity_changed)
+        self.ai_controller.cooldown_started.connect(self.on_cooldown_started)
+        # 组会模式信号
+        self.ai_controller.seminar_started.connect(self.on_seminar_started)
+        self.ai_controller.seminar_question.connect(self.on_seminar_question)
+        self.ai_controller.seminar_evaluation.connect(self.on_seminar_evaluation)
+        self.ai_controller.seminar_ended.connect(self.on_seminar_ended)
+        self.ai_controller.seminar_easter_egg.connect(self.on_seminar_easter_egg)
+        self.ai_controller.seminar_error.connect(self.on_seminar_error)
+        # 论文锐评信号
+        self.ai_controller.paper_critique_ready.connect(self.on_paper_critique_ready)
+
         # 保存当前活动请求ID
         self.active_request_id = None
+
+        # 初始化好感度显示
+        if self.ai_controller.affinity_manager:
+            self._update_affinity_display(
+                self.ai_controller.affinity_manager.affinity, 0, ""
+            )
     
     def set_paper_controller(self, paper_controller):
         """设置论文控制器引用"""
@@ -109,9 +130,71 @@ class ChatWidget(QWidget):
         title_label = QLabel("你的导师")
         title_label.setFont(title_font)
         title_label.setStyleSheet("color: white; font-weight: bold;")
-        
+
         title_layout.addWidget(title_label)
-        
+        title_layout.addStretch(1)
+
+        # 好感度指示器
+        self.affinity_emoji_label = QLabel("\U0001f610")  # 😐
+        self.affinity_emoji_label.setStyleSheet("color: white; font-size: 16px;")
+        title_layout.addWidget(self.affinity_emoji_label)
+
+        self.affinity_bar = QProgressBar()
+        self.affinity_bar.setRange(0, 100)
+        self.affinity_bar.setValue(50)
+        self.affinity_bar.setFixedWidth(80)
+        self.affinity_bar.setFixedHeight(12)
+        self.affinity_bar.setTextVisible(False)
+        self.affinity_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: rgba(255,255,255,0.3);
+                border: 1px solid rgba(255,255,255,0.5);
+                border-radius: 5px;
+            }
+            QProgressBar::chunk {
+                background-color: #FFC107;
+                border-radius: 4px;
+            }
+        """)
+        title_layout.addWidget(self.affinity_bar)
+
+        self.affinity_value_label = QLabel("50")
+        self.affinity_value_label.setStyleSheet("color: white; font-size: 11px;")
+        self.affinity_value_label.setFixedWidth(25)
+        title_layout.addWidget(self.affinity_value_label)
+
+        # 冷却提示标签（默认隐藏）
+        self.cooldown_label = QLabel("")
+        self.cooldown_label.setStyleSheet("color: #FF5252; font-size: 11px; font-weight: bold;")
+        self.cooldown_label.setVisible(False)
+        title_layout.addWidget(self.cooldown_label)
+
+        # 组会按钮
+        self.seminar_button = QPushButton("🎓 组会")
+        self.seminar_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.seminar_button.setFixedHeight(24)
+        self.seminar_button.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255,255,255,0.18);
+                color: white;
+                border: 1px solid rgba(255,255,255,0.4);
+                border-radius: 5px;
+                padding: 2px 10px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: rgba(255,255,255,0.30);
+            }
+            QPushButton:checked {
+                background-color: #E91E63;
+                border-color: #C2185B;
+            }
+        """)
+        self.seminar_button.setCheckable(True)
+        self.seminar_button.clicked.connect(self.toggle_seminar_mode)
+        title_layout.addWidget(self.seminar_button)
+
         return title_bar
     
     def create_chat_container(self):
@@ -137,13 +220,17 @@ class ChatWidget(QWidget):
         
         container_layout = QVBoxLayout(chat_container)
         container_layout.setContentsMargins(10, 10, 10, 10)
-        
+
+        # 组会进度横幅（默认隐藏）
+        self.seminar_banner = self._create_seminar_banner()
+        container_layout.addWidget(self.seminar_banner)
+
         # 创建消息显示区域
         self.scroll_area = self.create_message_display_area()
-        
+
         # 创建输入区域
         input_frame = self.create_input_area()
-        
+
         # 添加到容器布局
         container_layout.addWidget(self.scroll_area, 1)
         container_layout.addWidget(input_frame)
@@ -395,23 +482,27 @@ class ChatWidget(QWidget):
     
     def send_message(self):
         """
-        发送用户消息
-        
-        获取输入框中的消息，创建用户消息气泡并清空输入框
+        发送用户消息（组会模式下路由到答案提交）
         """
         message = self.message_input.toPlainText().strip()
-        if message:
-            # 添加用户消息气泡
-            user_bubble = MessageBubble(message, is_user=True)
-            self.messages_layout.addWidget(user_bubble)
-            
-            # 清空输入框
-            self.message_input.clear()
-            
-            # 滚动到底部
-            QTimer.singleShot(100, self.scroll_to_bottom)
-            
-            # 处理消息并获取AI响应
+        if not message:
+            return
+
+        # 添加用户消息气泡
+        user_bubble = MessageBubble(message, is_user=True)
+        self.messages_layout.addWidget(user_bubble)
+
+        # 清空输入框
+        self.message_input.clear()
+
+        # 滚动到底部
+        QTimer.singleShot(100, self.scroll_to_bottom)
+
+        # 组会模式：提交答案
+        if self._in_seminar and self.ai_controller:
+            self.ai_controller.submit_seminar_answer(message)
+        else:
+            # 正常模式：处理消息并获取AI响应
             self.process_message(message)
     
     def process_message(self, message):
@@ -480,6 +571,12 @@ class ChatWidget(QWidget):
         self.messages_layout.addWidget(ai_bubble)
         
         # 滚动到底部
+        QTimer.singleShot(100, self.scroll_to_bottom)
+
+    def on_paper_critique_ready(self, critique_text: str):
+        """收到教授锐评，作为教授的第一条消息显示"""
+        ai_bubble = MessageBubble(critique_text, is_user=False)
+        self.messages_layout.addWidget(ai_bubble)
         QTimer.singleShot(100, self.scroll_to_bottom)
 
     def on_ai_sentence_ready(self, sentence, request_id):
@@ -735,6 +832,221 @@ class ChatWidget(QWidget):
         # 其他事件交给父类处理
         return super().eventFilter(obj, event)
     
+    # ==================== 组会模式 UI ====================
+
+    def _create_seminar_banner(self) -> QFrame:
+        """创建组会模式进度横幅"""
+        banner = QFrame()
+        banner.setObjectName("seminarBanner")
+        banner.setVisible(False)
+        banner.setStyleSheet("""
+            #seminarBanner {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                             stop:0 #880E4F, stop:1 #AD1457);
+                border-radius: 8px;
+                padding: 4px;
+            }
+        """)
+        layout = QHBoxLayout(banner)
+        layout.setContentsMargins(12, 6, 12, 6)
+
+        self.seminar_icon_label = QLabel("🎓")
+        self.seminar_icon_label.setStyleSheet("font-size: 16px;")
+        layout.addWidget(self.seminar_icon_label)
+
+        self.seminar_status_label = QLabel("组会模式")
+        self.seminar_status_label.setStyleSheet(
+            "color: white; font-size: 12px; font-weight: bold;"
+        )
+        layout.addWidget(self.seminar_status_label)
+
+        layout.addStretch(1)
+
+        self.seminar_progress_label = QLabel("")
+        self.seminar_progress_label.setStyleSheet(
+            "color: rgba(255,255,255,0.85); font-size: 12px;"
+        )
+        layout.addWidget(self.seminar_progress_label)
+
+        exit_btn = QPushButton("结束组会")
+        exit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        exit_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255,255,255,0.2);
+                color: white;
+                border: 1px solid rgba(255,255,255,0.4);
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+            }
+            QPushButton:hover { background-color: rgba(255,255,255,0.35); }
+        """)
+        exit_btn.clicked.connect(self._on_exit_seminar_clicked)
+        layout.addWidget(exit_btn)
+
+        return banner
+
+    def toggle_seminar_mode(self, checked: bool):
+        """切换组会模式"""
+        if not self.ai_controller:
+            self.seminar_button.setChecked(False)
+            return
+
+        if checked:
+            self.seminar_button.setText("⏳ 生成中…")
+            self.seminar_button.setEnabled(False)
+            self.ai_controller.start_seminar()
+        else:
+            self.ai_controller.end_seminar()
+
+    def _on_exit_seminar_clicked(self):
+        """点击横幅上的"结束组会"按钮"""
+        if self.ai_controller:
+            self.ai_controller.end_seminar()
+
+    def on_seminar_started(self, paper_title: str):
+        """组会开始"""
+        self.seminar_button.setText("🎓 组会中")
+        self.seminar_button.setEnabled(True)
+        self.seminar_button.setChecked(True)
+        self.seminar_banner.setVisible(True)
+        self.seminar_status_label.setText(f"组会：{paper_title[:16]}")
+        self.seminar_progress_label.setText("正在生成问题…")
+        # 添加开场气泡
+        self._add_system_bubble(
+            f"📋 组会模式已开启！教授将针对《{paper_title}》提问，请认真作答。"
+        )
+        # 组会期间禁用正常发送（通过标志位控制）
+        self._in_seminar = True
+
+    def on_seminar_question(self, question: str, idx: int, total: int):
+        """收到组会问题"""
+        self.seminar_progress_label.setText(f"第 {idx}/{total} 题")
+        # 教授提问气泡（特殊样式：带题号前缀）
+        q_text = f"【第 {idx}/{total} 题】{question}"
+        ai_bubble = MessageBubble(q_text, is_user=False)
+        self.messages_layout.addWidget(ai_bubble)
+        QTimer.singleShot(100, self.scroll_to_bottom)
+        # 提示用户输入
+        self.message_input.setPlaceholderText("请输入你的回答，按 Enter 提交…")
+
+    def on_seminar_evaluation(self, feedback: str, delta: int, quality: str):
+        """收到答案评估"""
+        # 教授点评气泡
+        sign = "+" if delta > 0 else ""
+        eval_text = f"📝 {feedback}（好感度 {sign}{delta}）"
+        ai_bubble = MessageBubble(eval_text, is_user=False)
+        self.messages_layout.addWidget(ai_bubble)
+        QTimer.singleShot(100, self.scroll_to_bottom)
+
+    def on_seminar_ended(self, summary: str):
+        """组会结束"""
+        self._end_seminar_ui()
+        self._add_system_bubble(f"🏁 {summary}")
+
+    def on_seminar_easter_egg(self, speech: str):
+        """彩蛋触发"""
+        egg_bubble = MessageBubble(f"✨ {speech}", is_user=False)
+        self.messages_layout.addWidget(egg_bubble)
+        QTimer.singleShot(100, self.scroll_to_bottom)
+
+    def on_seminar_error(self, error: str):
+        """组会错误"""
+        self._end_seminar_ui()
+        self._add_system_bubble(f"⚠️ {error}")
+
+    def _end_seminar_ui(self):
+        """恢复组会结束后的 UI 状态"""
+        self._in_seminar = False
+        self.seminar_button.setText("🎓 组会")
+        self.seminar_button.setChecked(False)
+        self.seminar_button.setEnabled(True)
+        self.seminar_banner.setVisible(False)
+        self.message_input.setPlaceholderText("输入您对导师的问题…")
+
+    def _add_system_bubble(self, text: str):
+        """添加系统提示气泡（居中灰色）"""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet(
+            "color: #666; font-size: 12px; padding: 6px 12px;"
+            "background: rgba(0,0,0,0.04); border-radius: 6px; margin: 4px 20px;"
+        )
+        self.messages_layout.addWidget(label)
+        QTimer.singleShot(100, self.scroll_to_bottom)
+
+    # ==================== 好感度 UI ====================
+
+    def on_affinity_changed(self, value, delta, reason):
+        """好感度变化回调"""
+        self._update_affinity_display(value, delta, reason)
+
+    def _update_affinity_display(self, value, delta, reason):
+        """更新好感度 UI 显示"""
+        self.affinity_bar.setValue(value)
+        self.affinity_value_label.setText(str(value))
+
+        # 根据好感度等级变色
+        if value < 20:
+            chunk_color = "#F44336"   # 红
+        elif value < 40:
+            chunk_color = "#FF9800"   # 橙
+        elif value < 60:
+            chunk_color = "#FFC107"   # 黄
+        elif value < 80:
+            chunk_color = "#8BC34A"   # 浅绿
+        else:
+            chunk_color = "#E91E63"   # 粉（傲娇色）
+
+        self.affinity_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: rgba(255,255,255,0.3);
+                border: 1px solid rgba(255,255,255,0.5);
+                border-radius: 5px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
+                border-radius: 4px;
+            }}
+        """)
+
+        # 更新 emoji
+        if self.ai_controller and self.ai_controller.affinity_manager:
+            emoji = self.ai_controller.affinity_manager.get_level_emoji()
+            self.affinity_emoji_label.setText(emoji)
+
+        # 好感度变化时显示浮动提示
+        if delta != 0:
+            sign = "+" if delta > 0 else ""
+            tip = f"{sign}{delta}"
+            if reason:
+                tip += f" {reason}"
+            self.affinity_emoji_label.setToolTip(tip)
+
+    def on_cooldown_started(self, seconds):
+        """教授摔门冷却开始"""
+        self.cooldown_label.setVisible(True)
+        self._cooldown_remaining = seconds
+
+        if self.cooldown_timer:
+            self.cooldown_timer.stop()
+        self.cooldown_timer = QTimer(self)
+        self.cooldown_timer.timeout.connect(self._tick_cooldown)
+        self.cooldown_timer.start(1000)
+        self._tick_cooldown()
+
+    def _tick_cooldown(self):
+        """每秒更新冷却倒计时"""
+        if self._cooldown_remaining > 0:
+            self.cooldown_label.setText(f"\U0001f6aa {self._cooldown_remaining}s")
+            self._cooldown_remaining -= 1
+        else:
+            self.cooldown_label.setVisible(False)
+            if self.cooldown_timer:
+                self.cooldown_timer.stop()
+                self.cooldown_timer = None
+
     def closeEvent(self, event):
         """窗口关闭事件处理"""
         # 不再需要手动处理voice_thread，由ai_manager负责清理

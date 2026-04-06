@@ -27,11 +27,11 @@ class MarkdownProcessor:
         # 匹配标题的正则表达式（匹配 # 开头的行）
         self.title_pattern = re.compile(r'^(#+)\s*(\S.*?)$')
         
-        # 匹配摘要标题的正则表达式（匹配 ABSTRACT 或其变体）
-        self.abstract_pattern = re.compile(r'^#?\s*(?:\d+\.)?\s*(?:ABSTRACT|Abstract|abstract)')
-        
-        # 匹配参考文献标题的正则表达式
-        self.reference_pattern = re.compile(r'^#?\s*(?:\d+\.)?\s*(?:REFERENCES?|References?|references?)')
+        # 匹配摘要标题的正则表达式（匹配 ABSTRACT 或其变体，兼容 **加粗** 标记）
+        self.abstract_pattern = re.compile(r'^#?\s*\*{0,2}\s*(?:\d+\.)?\s*(?:ABSTRACT|Abstract|abstract)')
+
+        # 匹配参考文献标题的正则表达式（兼容 **加粗** 标记）
+        self.reference_pattern = re.compile(r'^#?\s*\*{0,2}\s*(?:\d+\.)?\s*(?:REFERENCES?|References?|references?)')
 
         # 匹配不带#的参考文献行
         self.reference_line_pattern = re.compile(r'^(?:REFERENCES?|References?|references?)(?:\s*:|\s*\.)?\s*$')
@@ -355,6 +355,9 @@ class MarkdownProcessor:
             elif title_match:
                 heading_level = len(title_match.group(1))  # 标题级别（# 的数量）
                 title_text = title_match.group(2).strip()  # 标题文本
+                # 去除 pymupdf4llm 生成的 **加粗** 和 _斜体_ 标记
+                title_text = re.sub(r'^\*{1,2}(.*?)\*{1,2}$', r'\1', title_text).strip()
+                title_text = re.sub(r'^_{1,2}(.*?)_{1,2}$', r'\1', title_text).strip()
                 
                 # 处理文档标题
                 if not has_started:

@@ -1,7 +1,42 @@
-from PyQt6.QtWidgets import QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QTextEdit, QSizePolicy
+from PyQt6.QtCore import Qt, QTimer, QSize
 from PyQt6.QtGui import QPixmap
 from paths import get_asset_path
+
+
+class _AutoHeightTextEdit(QTextEdit):
+    """根据内容自动调整高度的只读文本框"""
+
+    def __init__(self, text: str, text_color: str, parent=None):
+        super().__init__(parent)
+        self.setPlainText(text)
+        self.setReadOnly(True)
+        self.setFrameStyle(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setStyleSheet(f"""
+            QTextEdit {{
+                color: {text_color};
+                font-size: 14px;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
+            }}
+        """)
+
+    def _adjust_height(self):
+        doc_h = int(self.document().size().height())
+        if doc_h > 0:
+            self.setFixedHeight(doc_h + 4)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._adjust_height()
+
+    def sizeHint(self) -> QSize:
+        doc_h = int(self.document().size().height())
+        return QSize(super().sizeHint().width(), max(doc_h + 4, 20))
 
 class MessageBubble(QWidget):
     """
@@ -125,12 +160,8 @@ class MessageBubble(QWidget):
         bubble_layout = QVBoxLayout(bubble)
         bubble_layout.setContentsMargins(8, 8, 8, 8)
         
-        # 消息文本
-        msg_label = QLabel(message)
-        msg_label.setWordWrap(True)
-        msg_label.setStyleSheet(f"color: {text_color}; font-size: 14px;")
-        msg_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        
+        # 消息文本（自动高度文本框，正确处理长文本）
+        msg_label = _AutoHeightTextEdit(message, text_color)
         bubble_layout.addWidget(msg_label)
         
         # 创建容器（用于控制气泡大小比例）

@@ -149,15 +149,17 @@ class AIProfessorUI(QMainWindow):
         """
         
         # 最小化按钮
-        self.btn_minimize = QPushButton("🗕")
+        self.btn_minimize = QPushButton("—")
         self.btn_minimize.setStyleSheet(btn_style)
+        self.btn_minimize.setFixedSize(30, 24)
         self.btn_minimize.clicked.connect(self.showMinimized)
         self.btn_minimize.setToolTip("最小化")
         self.btn_minimize.setCursor(Qt.CursorShape.PointingHandCursor)
-        
+
         # 最大化/还原按钮
-        self.btn_maximize = QPushButton("🗖")
+        self.btn_maximize = QPushButton("☐")
         self.btn_maximize.setStyleSheet(btn_style)
+        self.btn_maximize.setFixedSize(30, 24)
         self.btn_maximize.clicked.connect(self.toggle_maximize)
         self.btn_maximize.setToolTip("最大化")
         self.btn_maximize.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -180,6 +182,7 @@ class AIProfessorUI(QMainWindow):
                 border-radius: 4px;
             }
         """)
+        self.btn_close.setFixedSize(30, 24)
         self.btn_close.clicked.connect(self.close)
         self.btn_close.setToolTip("关闭")
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -206,11 +209,11 @@ class AIProfessorUI(QMainWindow):
         """切换窗口最大化/还原状态"""
         if self.isMaximized():
             self.showNormal()
-            self.btn_maximize.setText("🗖")
+            self.btn_maximize.setText("☐")
             self.btn_maximize.setToolTip("最大化")
         else:
             self.showMaximized()
-            self.btn_maximize.setText("🗗")
+            self.btn_maximize.setText("❐")
             self.btn_maximize.setToolTip("还原")
 
     def init_ui_components(self):
@@ -441,6 +444,8 @@ class AIProfessorUI(QMainWindow):
         
         # 连接侧边栏的论文选择信号
         self.sidebar.paper_selected.connect(self.on_paper_selected)
+        # 连接删除论文信号
+        self.sidebar.paper_delete_requested.connect(self.data_manager.delete_paper)
 
         # 连接处理进度信号
         self.data_manager.processing_progress.connect(self.on_processing_progress)
@@ -463,12 +468,19 @@ class AIProfessorUI(QMainWindow):
     def on_paper_selected(self, paper_id):
         """
         处理论文选择事件
-        
+
         当用户在侧边栏选择一篇论文时，通知数据管理器加载相应内容
-        
+        并立即切换好感度到该论文对应的状态。
+
         Args:
             paper_id: 选择的论文ID
         """
+        # 立即切换好感度（在加载内容之前，确保UI先更新）
+        if hasattr(self, 'ai_manager') and self.ai_manager:
+            am = self.ai_manager.affinity_manager
+            if am and paper_id != am.current_paper_id:
+                am.switch_paper(paper_id)
+
         # 通知数据管理器加载选定的论文
         self.data_manager.load_paper_content(paper_id)
 
@@ -506,8 +518,13 @@ class AIProfessorUI(QMainWindow):
         title = paper.get('translated_title', '') or paper.get('title', '')
         self.statusBar().showMessage(f"已加载论文: {title}")
         
-        # 向AI助手发送论文加载通知
-        self.chat_widget.receive_ai_message(f"已加载论文「{title}」")
+        # 触发教授锐评（替代简单加载通知）
+        paper_id = paper.get('id', '')
+        if paper_id:
+            self.chat_widget.receive_ai_message(f"已加载论文「{title}」，教授正在审阅中……")
+            self.ai_manager.generate_paper_critique(paper_id)
+        else:
+            self.chat_widget.receive_ai_message(f"已加载论文「{title}」")
 
     def on_loading_error(self, error_message):
         """

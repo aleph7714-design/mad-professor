@@ -11,32 +11,35 @@ AI_ROUTER_PROMPT_PATH = "prompt/ai_router_prompt.txt"
 class AIProfessorChat:
     """
     AI对话助手 - 学术论文智能问答系统
-    
+
     支持多种回答策略：
     - 直接回答
     - 页面内容分析
     - 宏观检索（章节概要）
     - RAG检索（精准段落）
     """
-    
+
     def __init__(self):
         """初始化AI对话助手"""
         self.logger = logging.getLogger(__name__)
-        
+
         # 设置基础路径
         self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.output_path = os.path.join(self.base_path, "output")
-        
+
         # 对话历史 (保持最近10条)
         self.conversation_history = []
-        
+
         # 当前论文上下文
         self.current_paper_id = None
         self.current_paper_data = None
-        
+
         # 将实例化改为引用初始化
         self.retriever = None  # 稍后由AI_manager设置
-        
+
+        # 好感度管理器（由AI_manager注入）
+        self.affinity_manager = None
+
         # LLM客户端
         self.llm_client = None
         try:
@@ -462,9 +465,14 @@ class AIProfessorChat:
 
         explain_prompt = explain_prompt.format(title=title)
         
-        # 系统提示 - 使用回车拼接提示词
-        system_message = f"{character_prompt}\n{explain_prompt}"
-        
+        # 注入好感度修饰语（放在最末尾，确保LLM优先遵循）
+        affinity_modifier = ""
+        if self.affinity_manager:
+            affinity_modifier = self.affinity_manager.get_prompt_modifier()
+
+        # 系统提示 - 好感度修饰语放在最后，优先级最高
+        system_message = f"{character_prompt}\n{explain_prompt}\n\n【最高优先级指令】以下是你当前的心情状态，你的回复语气必须严格匹配这个状态：\n{affinity_modifier}"
+
         messages.append({"role": "system", "content": system_message})
         
         # 添加对话历史（不包括最新的用户查询）

@@ -55,7 +55,7 @@ class DataManager(QObject):
         """初始化处理队列和状态"""
         self.processing_queue = []    # 待处理文件队列
         self.is_processing = False    # 是否正在处理
-        self.is_paused = True         # 初始状态为暂停
+        self.is_paused = False        # 初始状态为运行（上传后自动开始处理）
         self.current_thread = None    # 当前处理线程
     
     def _init_pipeline(self):
@@ -79,8 +79,63 @@ class DataManager(QObject):
         except Exception as e:
             self.loading_error.emit(f"加载论文索引失败: {str(e)}")
     
+    def delete_paper(self, paper_id):
+        """删除指定论文及其所有相关文件
+
+        Args:
+            paper_id: 论文ID
+
+        Returns:
+            bool: 成功返回True
+        """
+        try:
+            # 从索引中找到论文
+            paper = next((p for p in self.papers_index if p["id"] == paper_id), None)
+            if not paper:
+                self.loading_error.emit(f"未找到ID为{paper_id}的论文")
+                return False
+
+            # 删除输出目录
+            paper_output_dir = os.path.join(self.output_dir, paper_id)
+            if os.path.exists(paper_output_dir):
+                shutil.rmtree(paper_output_dir)
+                self.message.emit(f"已删除输出目录: {paper_output_dir}")
+
+            # 删除源PDF文件
+            pdf_path = os.path.join(self.data_dir, f"{paper_id}.pdf")
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+                self.message.emit(f"已删除PDF文件: {pdf_path}")
+
+            # 从索引中移除
+            self.papers_index = [p for p in self.papers_index if p["id"] != paper_id]
+
+            # 保存更新后的索引
+            index_path = os.path.join(self.output_dir, "papers_index.json")
+            with open(index_path, 'w', encoding='utf-8') as f:
+                json.dump(self.papers_index, f, ensure_ascii=False, indent=2)
+
+            # 从处理队列中移除（如果还在排队）
+            self.processing_queue = [
+                item for item in self.processing_queue
+                if item.get('paper_id') != paper_id
+            ]
+
+            # 如果删除的是当前论文，清除当前状态
+            if self.current_paper and self.current_paper.get('id') == paper_id:
+                self.current_paper = None
+
+            # 通知UI刷新论文列表
+            self.papers_loaded.emit(self.papers_index)
+            self.message.emit(f"论文 {paper_id} 已删除")
+            return True
+
+        except Exception as e:
+            self.loading_error.emit(f"删除论文失败: {str(e)}")
+            return False
+
     # ========== 论文内容加载 ==========
-    
+
     def load_paper_content(self, paper_id):
         """
         加载指定论文的内容
